@@ -7,19 +7,18 @@
 #define	HEIGHT		1080
 #define SLICE_HEIGHT	16
 
-long nCheckAt;
-
+/* Performance measurer */
+struct timespec ts_checkAt;
 void check_in() {
-	struct timespec tp;
-	clock_gettime(CLOCK_REALTIME, &tp);
-	nCheckAt = tp.tv_nsec;
+	clock_gettime(CLOCK_REALTIME, &ts_checkAt);
 }
+long check_out() {
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	long nGap = ( ts.tv_sec - ts_checkAt.tv_sec ) * 1000000000 + ( ts.tv_nsec - ts_checkAt.tv_nsec );
+	// printf("Time elapsed %8ld us\n", nGap / 1000 );
 
-void check_out() {
-	struct timespec tp;
-	clock_gettime(CLOCK_REALTIME, &tp);
-	long nNow = tp.tv_nsec;
-	printf("Time elapsed %8d us\n", ( nNow - nCheckAt ) / 1000 );
+	return nGap;
 }
 
 void memcpyi(int* pDst, int* pSrc, int size) {
