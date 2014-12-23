@@ -29,7 +29,6 @@
 #include "arm_simd.h"
 
 #define	COMPONENT_CAMERA	"OMX.broadcom.camera"
-#define COMPONENT_SCHEDULER	"OMX.broadcom.video_scheduler"
 #define COMPONENT_RENDER	"OMX.broadcom.video_render"
 
 typedef struct {
@@ -52,7 +51,6 @@ typedef struct {
 	CQ_INSTANCE*				pQueueCameraBuffer;
 	pthread_t					thread_engine;
 	sem_t						sem_engine;
-
 	OMX_BOOL					isValid;
 	unsigned int				nFrameCaptured;
 } CONTEXT;
@@ -273,8 +271,8 @@ void componentConfigure() {
 
 	print_log("Get default definition of #90.");
 	OMX_GetParameter(mContext.pRender, OMX_IndexParamPortDefinition, &portDef);
-	portDef.nBufferCountMin = 3;
-	portDef.nBufferCountActual = 3;
+//	portDef.nBufferCountMin = 3;
+//	portDef.nBufferCountActual = 3;
 
 	print_log("Set up parameters of video format of #90.");
 	formatVideo = &portDef.format.video;
@@ -359,7 +357,9 @@ void* thread_engine(void* data) {
 	while(mContext.isValid) {
 		sem_wait(&mContext.sem_engine);
 		OMX_BUFFERHEADERTYPE* pBuffer = CQget(mContext.pQueueCameraBuffer);
-		if(pBuffer == NULL) continue;
+		if(pBuffer == NULL) {
+			continue;
+		}
 
 		// print_log("HAHA! 0x%08x 0x%08x 0x%08x", mContext.pCurrentY, mContext.pCurrentU, mContext.pCurrentV);
 		// 영상처리
@@ -490,7 +490,6 @@ int main(void) {
 	signal(SIGTSTP, SIG_DFL);
 	signal(SIGTERM, SIG_DFL);
 
-	// printf("\n%ld / %ld = %ld\n", elapsed, sliceCaptured, (long) (elapsed / sliceCaptured));
 	portCapturing.bEnabled = OMX_FALSE;
 	OMX_SetConfig(mContext.pCamera, OMX_IndexConfigPortCapturing, &portCapturing);
 	print_log("Capture stop.");

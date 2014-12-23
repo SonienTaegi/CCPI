@@ -30,7 +30,9 @@ void CQdestroy(CQ_INSTANCE* queue) {
 int CQput(CQ_INSTANCE* queue, CQ_PTR item) {
 	pthread_mutex_lock(&queue->mutex);
 	if(getRemain(queue) == 0) {
+		printf("! > ");
 		pthread_mutex_unlock(&queue->mutex);
+		printf("DDONG > ");
 		return -1;
 	}
 
@@ -47,7 +49,9 @@ CQ_PTR CQget(CQ_INSTANCE* queue) {
 	pthread_mutex_lock(&queue->mutex);
 
 	if(queue->head == queue->tail) {
+		printf("@ > ");
 		pthread_mutex_unlock(&queue->mutex);
+		printf("YAPPA > ");
 		return NULL;
 	}
 

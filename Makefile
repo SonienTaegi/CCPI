@@ -1,6 +1,6 @@
 # Simple makefile for rpi-openmax-demos.
 
-PROGRAMS = test
+PROGRAMS = ccpi
 OBJS     = common.o OMXsonien.o CircularQueue.o
 CC       = gcc
 CFLAGS   = -DSTANDALONE -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -DTARGET_POSIX -D_LINUX -DPIC -D_REENTRANT -D_LARGEFILE64_SOURCE \
