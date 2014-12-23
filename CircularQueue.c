@@ -1,3 +1,5 @@
+// #define __CQ_LOG
+
 #include <stdio.h>
 #include "CircularQueue.h"
 
@@ -11,9 +13,12 @@ CQ_INSTANCE* CQcreateInstance(int MAX_CQ_SIZE) {
 	CQ_INSTANCE* queue = malloc(sizeof(CQ_INSTANCE));
 
 	queue->begin = malloc(sizeof(void*) * ( MAX_CQ_SIZE + 1 ));
-	queue->end   = queue->begin + MAX_CQ_SIZE + 1;
+	queue->end   = queue->begin + MAX_CQ_SIZE;
 	queue->head  = queue->begin;
 	queue->tail  = queue->begin;
+#ifdef __CQ_LOG
+	printf("0x%08x : INT 0x%08x - 0x%08x\n", queue->begin, queue->begin, queue->end);
+#endif
 	pthread_mutex_init(&queue->mutex, NULL);
 	return queue;
 }
@@ -30,9 +35,7 @@ void CQdestroy(CQ_INSTANCE* queue) {
 int CQput(CQ_INSTANCE* queue, CQ_PTR item) {
 	pthread_mutex_lock(&queue->mutex);
 	if(getRemain(queue) == 0) {
-		printf("! > ");
 		pthread_mutex_unlock(&queue->mutex);
-		printf("DDONG > ");
 		return -1;
 	}
 
@@ -41,6 +44,9 @@ int CQput(CQ_INSTANCE* queue, CQ_PTR item) {
 	if(queue->tail == queue->end) {
 		queue->tail = queue->begin;
 	}
+#ifdef __CQ_LOG
+	printf("0x%08x : PUT 0x%08x - 0x%08x\n", queue->begin, queue->head, queue->tail);
+#endif
 	pthread_mutex_unlock(&queue->mutex);
 	return 0;
 }
@@ -49,9 +55,7 @@ CQ_PTR CQget(CQ_INSTANCE* queue) {
 	pthread_mutex_lock(&queue->mutex);
 
 	if(queue->head == queue->tail) {
-		printf("@ > ");
 		pthread_mutex_unlock(&queue->mutex);
-		printf("YAPPA > ");
 		return NULL;
 	}
 
@@ -60,6 +64,9 @@ CQ_PTR CQget(CQ_INSTANCE* queue) {
 	if(queue->head == queue->end) {
 		queue->head = queue->begin;
 	}
+#ifdef __CQ_LOG
+	printf("0x%08x : GET 0x%08x - 0x%08x\n", queue->begin, queue->head, queue->tail);
+#endif
 	pthread_mutex_unlock(&queue->mutex);
 	return item;
 }

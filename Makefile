@@ -1,5 +1,3 @@
-# Simple makefile for rpi-openmax-demos.
-
 PROGRAMS = ccpi
 OBJS     = common.o OMXsonien.o CircularQueue.o
 CC       = gcc

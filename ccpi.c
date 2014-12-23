@@ -271,8 +271,8 @@ void componentConfigure() {
 
 	print_log("Get default definition of #90.");
 	OMX_GetParameter(mContext.pRender, OMX_IndexParamPortDefinition, &portDef);
-//	portDef.nBufferCountMin = 3;
-//	portDef.nBufferCountActual = 3;
+	portDef.nBufferCountMin = 3;
+	portDef.nBufferCountActual = 3;
 
 	print_log("Set up parameters of video format of #90.");
 	formatVideo = &portDef.format.video;
@@ -344,6 +344,11 @@ void componentPrepare() {
 
 void prepareNextCanvas() {
 	mContext.pCurrentCanvas = OMXsonienBufferGet(mContext.pManagerRender);
+	while(!mContext.pCurrentCanvas) {
+		usleep(100);
+		// printf("Wait for next canvas\n");
+		mContext.pCurrentCanvas = OMXsonienBufferGet(mContext.pManagerRender);
+	}
 	mContext.pCurrentY	= mContext.pCurrentCanvas->pBuffer;
 	mContext.pCurrentU	= mContext.pCurrentY + mContext.nOffsetU;
 	mContext.pCurrentV	= mContext.pCurrentY + mContext.nOffsetV;
@@ -451,9 +456,9 @@ int main(void) {
 
 	// Camera Callback 용 Queue 생성
 	mContext.pQueueCameraBuffer = CQcreateInstance(3);
-	OMX_BUFFERHEADERTYPE* bufferScheduler;
-	while((bufferScheduler = OMXsonienBufferGet(mContext.pManagerCamera))) {
-		OMX_FillThisBuffer(mContext.pCamera, bufferScheduler);
+	OMX_BUFFERHEADERTYPE* bufferCamera = NULL;
+	while((bufferCamera = OMXsonienBufferGet(mContext.pManagerCamera))) {
+		OMX_FillThisBuffer(mContext.pCamera, bufferCamera);
 	}
 
 	usleep(20 * 1000);	// Wait for buffer fully filled.
