@@ -4,7 +4,7 @@
 #include "CircularQueue.h"
 
 inline int getRemain(CQ_INSTANCE* queue) {
-	return ( queue->head >= queue->tail ?
+	return ( queue->head > queue->tail ?
 				queue->head - queue->tail :
 				( queue->end - queue->begin ) - ( queue->tail - queue->head ) ) - 1 ;
 }
@@ -13,7 +13,7 @@ CQ_INSTANCE* CQcreateInstance(int MAX_CQ_SIZE) {
 	CQ_INSTANCE* queue = malloc(sizeof(CQ_INSTANCE));
 
 	queue->begin = malloc(sizeof(void*) * ( MAX_CQ_SIZE + 1 ));
-	queue->end   = queue->begin + MAX_CQ_SIZE;
+	queue->end   = queue->begin + MAX_CQ_SIZE + 1;
 	queue->head  = queue->begin;
 	queue->tail  = queue->begin;
 #ifdef __CQ_LOG
