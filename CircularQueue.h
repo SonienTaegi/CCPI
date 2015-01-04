@@ -20,4 +20,5 @@ int CQput(CQ_INSTANCE* queue, CQ_PTR item);
 
 void* CQget(CQ_INSTANCE* queue);
 
+int CQfreeSpace(CQ_INSTANCE* queue);
 #endif

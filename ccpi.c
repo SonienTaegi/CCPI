@@ -15,6 +15,8 @@
 #include <math.h>
 #include <time.h>
 #include <sys/time.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <semaphore.h>
 
@@ -23,36 +25,68 @@
 #include <IL/OMX_Video.h>
 #include <IL/OMX_Broadcom.h>
 
+#include <curl/curl.h>
+
 #include "common.h"
 #include "CircularQueue.h"
+#include "CircularBuffer.h"
 #include "OMXsonien.h"
 #include "arm_simd.h"
 
-#define	COMPONENT_CAMERA	"OMX.broadcom.camera"
-#define COMPONENT_RENDER	"OMX.broadcom.video_render"
+#define CAPTURE_WIDTH      1024
+#define CAPTURE_HEIGHT     768
+#define CAPTURE_FRAMERATES 15
+
+#define	COMPONENT_CAMERA "OMX.broadcom.camera"
+#define COMPONENT_RENDER "OMX.broadcom.video_render"
+#define COMPONENT_ENCODE "OMX.broadcom.video_encode"
+#define FIFO_PATH        "fifo.fifo"
+// #define FIFO
 
 typedef struct {
-	OMX_HANDLETYPE				pCamera;
-	OMX_HANDLETYPE				pRender;
-	OMX_BOOL					isCameraReady;
+	// General Setting
+	unsigned int nWidth;
+	unsigned int nHeight;
+	unsigned int nFramerate;
 
-	unsigned int				nWidth;
-	unsigned int				nHeight;
-	unsigned int				nFramerate;
+	// Handles
+	OMX_HANDLETYPE pCamera;
+	OMX_HANDLETYPE pRender;
+	OMX_HANDLETYPE pEncode;
 
-	unsigned int				nSliceSizeY, nSliceSizeU, nSliceSizeV;
-	unsigned int				nOffsetY, nOffsetU, nOffsetV;
-	OMXsonien_BUFFERMANAGER*	pManagerCamera;
-	OMXsonien_BUFFERMANAGER*	pManagerRender;
-	OMX_BUFFERHEADERTYPE*		pCurrentCanvas;
-	OMX_U8*						pCurrentY;
-	OMX_U8*						pCurrentU;
-	OMX_U8*						pCurrentV;
-	CQ_INSTANCE*				pQueueCameraBuffer;
-	pthread_t					thread_engine;
-	sem_t						sem_engine;
-	OMX_BOOL					isValid;
-	unsigned int				nFrameCaptured;
+	// Application validity and monitoring
+	OMX_BOOL       isValid;
+	unsigned int   nFrameCaptured;
+
+	// Variants for camera
+	OMXsonien_BUFFERMANAGER* pManagerCamera;
+	unsigned int nSliceSizeY, nSliceSizeU, nSliceSizeV;
+	unsigned int nOffsetY, nOffsetU, nOffsetV;
+	OMX_BOOL     isCameraReady;
+
+	// Variants for encoder : Output
+	OMXsonien_BUFFERMANAGER* pManagerEncOut;
+	CB_INSTANCE* pBufferStreamOut;
+	pthread_t    thread_stream;
+	sem_t        sem_stream;
+	FILE*        fp_stream; // Option for FIFO
+	int          f_stream;  // Option for FIFO
+
+	// Variants for encoder : Input
+	OMXsonien_BUFFERMANAGER* pManagerEncIn;
+	CQ_INSTANCE* pQueueEncIn;
+	pthread_t    thread_encIn;
+	sem_t        sem_encIn;
+
+	// Varuabts for Renderer
+	OMXsonien_BUFFERMANAGER* pManagerRender;
+	OMX_BUFFERHEADERTYPE*    pCurrentCanvas;
+	OMX_U8*                  pCurrentY;
+	OMX_U8*                  pCurrentU;
+	OMX_U8*                  pCurrentV;
+	CQ_INSTANCE*             pQueueCameraBuffer;
+	pthread_t                thread_engine;
+	sem_t                    sem_engine;
 } CONTEXT;
 
 /* Application variant */
@@ -97,29 +131,51 @@ OMX_ERRORTYPE onOMXevent (
 }
 
 /* Callback : Camera-out buffer is filled */
-OMX_ERRORTYPE onFillCameraOut (
+OMX_ERRORTYPE onFillBufferDone (
 		OMX_OUT OMX_HANDLETYPE hComponent,
 		OMX_OUT OMX_PTR pAppData,
 		OMX_OUT OMX_BUFFERHEADERTYPE* pBuffer) {
-	CQput(mContext.pQueueCameraBuffer, pBuffer);
-	sem_post(&mContext.sem_engine);
+	if(hComponent == mContext.pCamera) {
+		CQput(mContext.pQueueCameraBuffer, pBuffer);
+		sem_post(&mContext.sem_engine);
+	}
+	else if(hComponent == mContext.pEncode) {
+#ifdef FIFO
+		fwrite(pBuffer->pBuffer, pBuffer->nFilledLen, 1, mContext.fp_stream);
+#endif
+		// write(mContext.f_stream, pBuffer->pBuffer, pBuffer->nFilledLen);
+		CBput(mContext.pBufferStreamOut, pBuffer->pBuffer, pBuffer->nFilledLen);
 
+//		int fetchSize = CBget(mContext.pBufferStreamOut, pBuffer->pBuffer, 10000);
+//		printf("%5d bytes = %5d ", pBuffer->nFilledLen, fetchSize);
+//		while(fetchSize) {
+//			fetchSize = CBget(mContext.pBufferStreamOut, pBuffer->pBuffer + fetchSize, 10000);
+//			// printf("System hacked!! Chase me. From Keith");
+//			printf("+ %5d ", fetchSize);
+//		}
+		OMX_FillThisBuffer(hComponent, pBuffer);
+	}
 	return OMX_ErrorNone;
 }
 
 /* Callback : Render-in buffer is emptied */
-OMX_ERRORTYPE onEmptyRenderIn(
+OMX_ERRORTYPE onEmptyBufferDone(
 		OMX_IN OMX_HANDLETYPE hComponent,
 		OMX_IN OMX_PTR pAppData,
 		OMX_IN OMX_BUFFERHEADERTYPE* pBuffer) {
-	OMXsonienBufferPut(mContext.pManagerRender, pBuffer);
+	if(hComponent == mContext.pRender) {
+		OMXsonienBufferPut(mContext.pManagerRender, pBuffer);
+	}
+	else if(hComponent == mContext.pEncode) {
+		OMXsonienBufferPut(mContext.pManagerEncIn, pBuffer);
+	}
+
 	return OMX_ErrorNone;
 }
 
 /* Callback : Error detection callback of OMXsonien */
 void onOMXsonienError(OMX_ERRORTYPE err) {
 	printf("Error : 0x%08x\n", err);
-	terminate();
 	exit(-1);
 }
 
@@ -131,7 +187,7 @@ void terminate() {
 	print_log("On terminating...");
 
 	OMX_STATETYPE state;
-	OMX_BOOL bWaitForCamera, bWaitForScheduler, bWaitForRender;
+	OMX_BOOL bWaitForCamera, bWaitForEncode, bWaitForRender;
 
 	// Engine Stop
 	if(mContext.thread_engine) {
@@ -141,8 +197,22 @@ void terminate() {
 		sem_close(&mContext.sem_engine);
 	}
 
+	// Encoder In Pump Stop
+	if(mContext.thread_encIn) {
+		sem_post(&mContext.sem_encIn);
+		pthread_join(mContext.thread_encIn, NULL);
+		mContext.thread_encIn = NULL;
+		sem_close(&mContext.sem_encIn);
+	}
+
+	// Stream Stop
+	if(mContext.thread_stream) {
+		// 이야호
+		mContext.thread_stream = NULL;
+	}
+
 	// Execute -> Idle
-	bWaitForCamera = bWaitForScheduler = bWaitForRender = OMX_FALSE;
+	bWaitForCamera = bWaitForEncode = bWaitForRender = OMX_FALSE;
 	if(isState(mContext.pCamera, OMX_StateExecuting)) {
 		OMX_SendCommand(mContext.pCamera, OMX_CommandStateSet, OMX_StateIdle, NULL);
 		bWaitForCamera = OMX_TRUE;
@@ -151,11 +221,16 @@ void terminate() {
 		OMX_SendCommand(mContext.pRender, OMX_CommandStateSet, OMX_StateIdle, NULL);
 		bWaitForRender = OMX_TRUE;
 	}
+	if(isState(mContext.pEncode, OMX_StateExecuting)) {
+		OMX_SendCommand(mContext.pEncode, OMX_CommandStateSet, OMX_StateIdle, NULL);
+		bWaitForEncode = OMX_TRUE;
+	}
 	if(bWaitForCamera) wait_for_state_change(OMX_StateIdle, mContext.pCamera, NULL);
 	if(bWaitForRender) wait_for_state_change(OMX_StateIdle, mContext.pRender, NULL);
+	if(bWaitForEncode) wait_for_state_change(OMX_StateIdle, mContext.pEncode, NULL);
 
 	// Idle -> Loaded
-	bWaitForCamera = bWaitForRender = OMX_FALSE;
+	bWaitForCamera = bWaitForEncode = bWaitForRender = OMX_FALSE;
 	if(isState(mContext.pCamera, OMX_StateIdle)) {
 		OMX_SendCommand(mContext.pCamera, OMX_CommandStateSet, OMX_StateLoaded, NULL);
 		bWaitForCamera = OMX_TRUE;
@@ -164,21 +239,42 @@ void terminate() {
 		OMX_SendCommand(mContext.pRender, OMX_CommandStateSet, OMX_StateLoaded, NULL);
 		bWaitForRender = OMX_TRUE;
 	}
+	if(isState(mContext.pEncode, OMX_StateIdle)) {
+		OMX_SendCommand(mContext.pEncode, OMX_CommandStateSet, OMX_StateLoaded, NULL);
+		bWaitForEncode = OMX_TRUE;
+	}
 
 	// Buffer release
+	if(mContext.pQueueCameraBuffer) {
+		CQdestroy(mContext.pQueueCameraBuffer);
+	}
+	if(mContext.pQueueEncIn) {
+		CQdestroy(mContext.pQueueEncIn);
+	}
+	if(mContext.pBufferStreamOut) {
+		CBdestroy(mContext.pBufferStreamOut);
+	}
+
+	if(mContext.fp_stream) {
+		fclose(mContext.fp_stream);
+	}
+	if(mContext.f_stream) {
+		close(mContext.f_stream);
+	}
+
 	OMXsonienFreeBuffer(mContext.pManagerCamera);
 	OMXsonienFreeBuffer(mContext.pManagerRender);
+	OMXsonienFreeBuffer(mContext.pManagerEncIn);
+	OMXsonienFreeBuffer(mContext.pManagerEncOut);
 
 	if(bWaitForCamera) wait_for_state_change(OMX_StateLoaded, mContext.pCamera, NULL);
 	if(bWaitForRender) wait_for_state_change(OMX_StateLoaded, mContext.pRender, NULL);
+	if(bWaitForEncode) wait_for_state_change(OMX_StateLoaded, mContext.pEncode, NULL);
 
 	// Loaded -> Free
 	if(isState(mContext.pCamera, OMX_StateLoaded)) OMX_FreeHandle(mContext.pCamera);
 	if(isState(mContext.pRender, OMX_StateLoaded)) OMX_FreeHandle(mContext.pRender);
-
-	if(mContext.pQueueCameraBuffer) {
-		CQdestroy(mContext.pQueueCameraBuffer);
-	}
+	if(isState(mContext.pEncode, OMX_StateLoaded)) OMX_FreeHandle(mContext.pEncode);
 
 	OMXsonienDeinit();
 	OMX_Deinit();
@@ -198,6 +294,10 @@ void componentLoad(OMX_CALLBACKTYPE* pCallbackOMX) {
 	print_log("Load %s", COMPONENT_RENDER);
 	OMXsonienCheckError(OMX_GetHandle(&mContext.pRender, COMPONENT_RENDER, &mContext, pCallbackOMX));
 	print_log("Handler address : 0x%08x", mContext.pRender);
+
+	print_log("Load %s", COMPONENT_ENCODE);
+	OMXsonienCheckError(OMX_GetHandle(&mContext.pEncode, COMPONENT_ENCODE, &mContext, pCallbackOMX));
+	print_log("Handler address : 0x%08x", mContext.pEncode);
 }
 
 void componentConfigure() {
@@ -285,6 +385,69 @@ void componentConfigure() {
 	formatVideo->xFramerate			= mContext.nFramerate << 16;
 	OMXsonienCheckError(OMX_SetParameter(mContext.pRender, OMX_IndexParamPortDefinition, &portDef));
 
+	// Set Encoder input format of #200 port.
+	print_log("Set video format of the encoder input : Using #200.");
+	OMX_INIT_STRUCTURE(portDef);
+	portDef.nPortIndex = 200;
+
+	print_log("Get default definition of #200.");
+	OMX_GetParameter(mContext.pEncode, OMX_IndexParamPortDefinition, &portDef);
+	portDef.nBufferCountMin = 3;
+	portDef.nBufferCountActual = 3;
+
+	print_log("Set up parameters of video format of #200.");
+	formatVideo = &portDef.format.video;
+	formatVideo->eColorFormat 		= OMX_COLOR_FormatYUV420PackedPlanar;
+	formatVideo->eCompressionFormat = OMX_VIDEO_CodingUnused;
+	formatVideo->nFrameWidth		= mContext.nWidth;
+	formatVideo->nFrameHeight		= mContext.nHeight;
+	formatVideo->nStride			= mContext.nWidth;
+	formatVideo->nSliceHeight	    = mContext.nHeight;
+	formatVideo->xFramerate			= mContext.nFramerate << 16;
+	OMXsonienCheckError(OMX_SetParameter(mContext.pEncode, OMX_IndexParamPortDefinition, &portDef));
+
+	// Set Encoder output format of #201 port.
+	print_log("Set video format of the encoder output : Using #201.");
+	OMX_INIT_STRUCTURE(portDef);
+	portDef.nPortIndex = 201;
+
+	print_log("Get default definition of #201.");
+	OMX_GetParameter(mContext.pEncode, OMX_IndexParamPortDefinition, &portDef);
+	// portDef.nBufferCountMin = 3;
+	// portDef.nBufferCountActual = 3;
+
+	print_log("Set up parameters of video format of #201.");
+	formatVideo = &portDef.format.video;
+	formatVideo->nFrameWidth		= mContext.nWidth;
+	formatVideo->nFrameHeight		= mContext.nHeight;
+	formatVideo->nStride			= 0; //mContext.nWidth;
+	formatVideo->nSliceHeight		= 0; //mContext.nHeight;
+	formatVideo->eCompressionFormat	= OMX_VIDEO_CodingAVC; // OMX_VIDEO_CodingMPEG4
+	formatVideo->eColorFormat		= OMX_COLOR_FormatUnused;
+	formatVideo->nBitrate = 10000000;
+	OMXsonienCheckError(OMX_SetParameter(mContext.pEncode, OMX_IndexParamPortDefinition, &portDef));
+
+	// Set Encoder target bitrate
+	OMX_VIDEO_PARAM_BITRATETYPE bitrateType;
+	OMX_INIT_STRUCTURE(bitrateType);
+	bitrateType.nPortIndex = 201;
+	bitrateType.eControlRate = OMX_Video_ControlRateVariable;
+	bitrateType.nTargetBitrate = 10000000;
+	OMXsonienCheckError(OMX_SetParameter(mContext.pEncode, OMX_IndexParamVideoBitrate, &bitrateType));
+
+//	AVC Setting. Broadway decoder doesn't allows B frame nor Weighted PPrediction
+//	ex :
+//	ffmpeg -coder 0 -bf 0 -wpredp 0 ...
+
+	OMX_VIDEO_PARAM_AVCTYPE param_avc;
+	OMX_INIT_STRUCTURE(param_avc);
+	param_avc.nPortIndex = 201;
+	OMX_GetParameter(mContext.pEncode, OMX_IndexParamVideoAvc, &param_avc);
+	param_avc.bWeightedPPrediction = OMX_FALSE;
+	param_avc.eProfile = OMX_VIDEO_AVCProfileBaseline;
+	param_avc.nBFrames = 0;
+	OMXsonienCheckError(OMX_SetParameter(mContext.pEncode, OMX_IndexParamVideoAvc, &param_avc));
+
 	// Configure rendering region
 	OMX_CONFIG_DISPLAYREGIONTYPE displayRegion;
 	OMX_INIT_STRUCTURE(displayRegion);
@@ -318,6 +481,9 @@ void componentPrepare() {
 	print_log("STATE : RENDER - IDLE request");
 	OMXsonienCheckError(OMX_SendCommand(mContext.pRender, OMX_CommandStateSet, OMX_StateIdle, NULL));
 
+	print_log("STATE : ENCODE - IDLE request");
+	OMXsonienCheckError(OMX_SendCommand(mContext.pEncode, OMX_CommandStateSet, OMX_StateIdle, NULL));
+
 	// Allocate buffers to render
 	print_log("Allocate buffer to renderer #90 for input.");
 	OMX_INIT_STRUCTURE(portDef);
@@ -333,8 +499,22 @@ void componentPrepare() {
 	print_log("Size of predefined buffer : %d * %d", portDef.nBufferSize, portDef.nBufferCountActual);
 	mContext.pManagerCamera = OMXsonienAllocateBuffer(mContext.pCamera, 71, &mContext, 0, 0);
 
+	// Allocate buffer to encoder in
+	OMX_INIT_STRUCTURE(portDef);
+	portDef.nPortIndex = 200;
+	OMX_GetParameter(mContext.pEncode, OMX_IndexParamPortDefinition, &portDef);
+	print_log("Size of predefined buffer : %d * %d", portDef.nBufferSize, portDef.nBufferCountActual);
+	mContext.pManagerEncIn = OMXsonienAllocateBuffer(mContext.pEncode, 200, &mContext, 0, 0);
+
+	// Allocate buffer to encoder out
+	OMX_INIT_STRUCTURE(portDef);
+	portDef.nPortIndex = 201;
+	OMX_GetParameter(mContext.pEncode, OMX_IndexParamPortDefinition, &portDef);
+	print_log("Size of predefined buffer : %d * %d", portDef.nBufferSize, portDef.nBufferCountActual);
+	mContext.pManagerEncOut = OMXsonienAllocateBuffer(mContext.pEncode, 201, &mContext, 0, 0);
+
 	// Wait up for component being idle.
-	if(!wait_for_state_change(OMX_StateIdle, mContext.pRender, mContext.pCamera, NULL)) {
+	if(!wait_for_state_change(OMX_StateIdle, mContext.pRender, mContext.pEncode, mContext.pCamera, NULL)) {
 		print_log("FAIL");
 		terminate();
 		exit(-1);
@@ -354,9 +534,52 @@ void prepareNextCanvas() {
 	mContext.pCurrentV	= mContext.pCurrentY + mContext.nOffsetV;
 }
 
-//int  nFrameTemp 	= 0;
-//long time_elapse 	= 0;
-//long time_elapsed 	= 0;
+size_t stream_callback(void *dst, size_t size, size_t nmemb, void *context) {
+	CONTEXT* pContext = (CONTEXT*)context;
+	int nbyte = 0;
+	while(pContext->isValid) {
+		nbyte = CBget(pContext->pBufferStreamOut, dst, size * nmemb);
+		if(nbyte) break;
+		usleep(1000);
+	}
+
+//	if(nbyte) {
+//		printf("SEND : %5d / %5d bytes\n", nbyte, size * nmemb);
+//	}
+	return (size_t)nbyte;
+}
+
+void* thread_stream(void* data) {
+	char url[1000];
+	sprintf(&url, "http://127.0.0.1:8082/kovcam/%d/%d", mContext.nWidth, mContext.nHeight);
+
+	curl_global_init(CURL_GLOBAL_ALL);
+	CURL *curl = curl_easy_init();
+	if(!curl) return NULL;
+
+	curl_easy_setopt(curl, CURLOPT_READFUNCTION, stream_callback);
+	curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+	// curl_easy_setopt(curl, CURLOPT_PUT, 1L);
+	curl_easy_setopt(curl, CURLOPT_URL, &url);
+	curl_easy_setopt(curl, CURLOPT_READDATA, &mContext);
+	curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, (curl_off_t)-1);
+	printf("Broadcast stream : START\n");
+	curl_easy_perform(curl);
+	printf("Broadcast stream : FINISH\n");
+	curl_easy_cleanup(curl);
+}
+
+void* thread_encIn(void* data) {
+	while(mContext.isValid) {
+		sem_wait(&mContext.sem_encIn);
+		OMX_BUFFERHEADERTYPE* pBuffer = CQget(mContext.pQueueEncIn);
+		if(pBuffer == NULL) {
+			continue;
+		}
+
+		OMX_EmptyThisBuffer(mContext.pEncode, pBuffer);
+	}
+}
 
 void* thread_engine(void* data) {
 	while(mContext.isValid) {
@@ -382,23 +605,25 @@ void* thread_engine(void* data) {
 
 		mContext.pCurrentCanvas->nFilledLen += pBuffer->nFilledLen;
 		if(pBuffer->nFlags & OMX_BUFFERFLAG_ENDOFFRAME) {
+			// Request Encoding
+			OMX_BUFFERHEADERTYPE* pBufferEncIn = OMXsonienBufferGet(mContext.pManagerEncIn);
+			if(pBufferEncIn) {
+				memcpy(pBufferEncIn->pBuffer, mContext.pCurrentCanvas->pBuffer, mContext.pCurrentCanvas->nFilledLen);
+				pBufferEncIn->nFilledLen = mContext.pCurrentCanvas->nFilledLen;
+				CQput(mContext.pQueueEncIn, pBufferEncIn);
+				sem_post(&mContext.sem_encIn);
+			}
+			else {
+				printf("[WARN] Skip a frame\n");
+			}
 			OMX_EmptyThisBuffer(mContext.pRender, mContext.pCurrentCanvas);
 			prepareNextCanvas();
 
 			mContext.nFrameCaptured++;
-			/*
-			if( ++nFrameTemp == 30) {
-				print_log("Elapsed time for fill buffer %d ms", (time_elapse - time_elapsed) / 1000000 );
-				time_elapsed = time_elapse;
-				nFrameTemp = 0;
-			}
-			*/
 		}
 
 		// 버퍼 반납
-//		check_in();
 		OMX_FillThisBuffer(mContext.pCamera, pBuffer);
-//		time_elapse += check_out();
 	}
 }
 
@@ -409,11 +634,17 @@ int main(void) {
 
 	/* Initialize application variables */
 	memset(&mContext, 0, (size_t)sizeof(mContext));
-	mContext.nWidth 	= 1280;
-	mContext.nHeight 	= 960;
-	mContext.nFramerate	= 30;
+	mContext.nWidth 	= CAPTURE_WIDTH;
+	mContext.nHeight 	= CAPTURE_HEIGHT;
+	mContext.nFramerate	= CAPTURE_FRAMERATES;
 	mContext.isValid	= OMX_TRUE;
 	sem_init(&mContext.sem_engine, 0, 0);
+	sem_init(&mContext.sem_encIn, 0, 0);
+	sem_init(&mContext.sem_stream, 0, 0);
+#ifdef FIFO
+	mContext.fp_stream = fopen(FIFO_PATH, "wb");
+#endif
+	// mContext.f_stream = open(FIFO_PATH, O_RDWR);
 
 	// RPI initialize.
 	bcm_host_init();
@@ -433,8 +664,8 @@ int main(void) {
 	// For loading component, Callback shall provide.
 	OMX_CALLBACKTYPE callbackOMX;
 	callbackOMX.EventHandler	= onOMXevent;
-	callbackOMX.EmptyBufferDone	= onEmptyRenderIn;
-	callbackOMX.FillBufferDone	= onFillCameraOut;
+	callbackOMX.EmptyBufferDone	= onEmptyBufferDone;
+	callbackOMX.FillBufferDone	= onFillBufferDone;
 
 	componentLoad(&callbackOMX);
 	componentConfigure();
@@ -447,6 +678,9 @@ int main(void) {
 	print_log("STATE : RENDER - EXECUTING request");
 	OMXsonienCheckError(OMX_SendCommand(mContext.pRender, OMX_CommandStateSet, OMX_StateExecuting, NULL));
 
+	print_log("STATE : ENCODE - EXECUTING request");
+	OMXsonienCheckError(OMX_SendCommand(mContext.pEncode, OMX_CommandStateSet, OMX_StateExecuting, NULL));
+
 	if(!wait_for_state_change(OMX_StateExecuting, mContext.pCamera, mContext.pRender, NULL)) {
 		print_log("FAIL");
 		terminate();
@@ -454,11 +688,22 @@ int main(void) {
 	}
 	print_log("STATE : EXECUTING OK!");
 
-	// Camera Callback 용 Queue 생성
+	// Queue and Buffer 준비
+	mContext.pBufferStreamOut = CBcreateInstance(1024 * 1024);
 	mContext.pQueueCameraBuffer = CQcreateInstance(3);
-	OMX_BUFFERHEADERTYPE* bufferCamera = NULL;
-	while((bufferCamera = OMXsonienBufferGet(mContext.pManagerCamera))) {
-		OMX_FillThisBuffer(mContext.pCamera, bufferCamera);
+	mContext.pQueueEncIn = CQcreateInstance(3);
+
+	// 쓰기 버퍼 준비
+	{
+		OMX_BUFFERHEADERTYPE* buffer = NULL;
+		while((buffer = OMXsonienBufferGet(mContext.pManagerEncOut))) {
+			OMX_FillThisBuffer(mContext.pEncode, buffer);
+		}
+
+		buffer = NULL;
+		while((buffer = OMXsonienBufferGet(mContext.pManagerCamera))) {
+			OMX_FillThisBuffer(mContext.pCamera, buffer);
+		}
 	}
 
 	usleep(20 * 1000);	// Wait for buffer fully filled.
@@ -466,8 +711,14 @@ int main(void) {
 	// Ready for render
 	prepareNextCanvas();
 
+	// Stream start
+	pthread_create(&mContext.thread_stream, NULL, thread_stream, NULL);
+
 	// Engine Start
 	pthread_create(&mContext.thread_engine, NULL, thread_engine, NULL);
+
+	// Encoder In pump Start
+	pthread_create(&mContext.thread_encIn, NULL, thread_encIn, NULL);
 
 	// Since #71 is capturing port, needs capture signal like other handy capture devices
 	print_log("Capture start.");
