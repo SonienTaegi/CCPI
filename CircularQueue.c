@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include "CircularQueue.h"
 
-inline int getRemain(CQ_INSTANCE* queue) {
+inline int getFreeSpaceSize(CQ_INSTANCE* queue) {
 	return ( queue->head > queue->tail ?
 				queue->head - queue->tail :
 				( queue->end - queue->begin ) - ( queue->tail - queue->head ) ) - 1 ;
@@ -34,7 +34,7 @@ void CQdestroy(CQ_INSTANCE* queue) {
 
 int CQput(CQ_INSTANCE* queue, CQ_PTR item) {
 	pthread_mutex_lock(&queue->mutex);
-	if(getRemain(queue) == 0) {
+	if(getFreeSpaceSize(queue) == 0) {
 		pthread_mutex_unlock(&queue->mutex);
 		return -1;
 	}
@@ -69,4 +69,11 @@ CQ_PTR CQget(CQ_INSTANCE* queue) {
 #endif
 	pthread_mutex_unlock(&queue->mutex);
 	return item;
+}
+
+int CQfreeSpace(CQ_INSTANCE* queue) {
+	pthread_mutex_lock(&queue->mutex);
+	int size = getFreeSpaceSize(queue);
+	pthread_mutex_unlock(&queue->mutex);
+	return size;
 }
