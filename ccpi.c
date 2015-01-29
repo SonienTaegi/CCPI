@@ -33,8 +33,8 @@
 #include "OMXsonien.h"
 #include "arm_simd.h"
 
-#define CAPTURE_WIDTH      1024
-#define CAPTURE_HEIGHT     768
+#define CAPTURE_WIDTH      640
+#define CAPTURE_HEIGHT     480
 #define CAPTURE_FRAMERATES 15
 
 #define	COMPONENT_CAMERA "OMX.broadcom.camera"
@@ -130,6 +130,7 @@ OMX_ERRORTYPE onOMXevent (
 	return OMX_ErrorNone;
 }
 
+OMX_BOOL isSPS = OMX_TRUE;
 /* Callback : Camera-out buffer is filled */
 OMX_ERRORTYPE onFillBufferDone (
 		OMX_OUT OMX_HANDLETYPE hComponent,
@@ -140,6 +141,14 @@ OMX_ERRORTYPE onFillBufferDone (
 		sem_post(&mContext.sem_engine);
 	}
 	else if(hComponent == mContext.pEncode) {
+		if(isSPS) {
+			printf("SPS : %d bytes\n", pBuffer->nFilledLen);
+			for(int i = 0; i < pBuffer->nFilledLen; i++) {
+				printf("%02x", *(pBuffer->pBuffer + i));
+			}
+			printf("\n");
+			isSPS = OMX_FALSE;
+		}
 #ifdef FIFO
 		fwrite(pBuffer->pBuffer, pBuffer->nFilledLen, 1, mContext.fp_stream);
 #endif

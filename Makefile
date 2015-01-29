@@ -1,5 +1,5 @@
 PROGRAMS = ccpi
-OBJS     = common.o OMXsonien.o CircularQueue.o
+OBJS     = common.o OMXsonien.o CircularQueue.o CircularBuffer.o
 CC       = gcc
 CFLAGS   = -DSTANDALONE -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -DTARGET_POSIX -D_LINUX -DPIC -D_REENTRANT -D_LARGEFILE64_SOURCE \
            -D_FILE_OFFSET_BITS=64 -U_FORTIFY_SOURCE -DHAVE_LIBOPENMAX=2 -DOMX -DOMX_SKIP64BIT -ftree-vectorize -pipe -DUSE_EXTERNAL_OMX \
@@ -7,7 +7,7 @@ CFLAGS   = -DSTANDALONE -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -DTARGET_
            -I/opt/vc/include -I/opt/vc/include/interface/vcos/pthreads -I/opt/vc/include/interface/vmcs_host/linux \
            -fPIC -ftree-vectorize -pipe -Wall -std=gnu99 -O3 
 # -g
-LDFLAGS  = 	-L/opt/vc/lib -lopenmaxil -lbcm_host -lvcos -lvchiq_arm -lpthread -lrt -lm -lcurses
+LDFLAGS  = 	-L/opt/vc/lib -lopenmaxil -lbcm_host -lvcos -lvchiq_arm -lpthread -lrt -lm -lcurses -lcurl
 
 # Comment for production compile
 CFLAGS   += -D__LOG
